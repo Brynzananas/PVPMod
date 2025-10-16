@@ -1,0 +1,638 @@
+﻿using BepInEx;
+using BepInEx.Configuration;
+using BepInEx.Logging;
+using HarmonyLib;
+using JetBrains.Annotations;
+using Mono.Cecil.Cil;
+using MonoMod.Cil;
+using MonoMod.RuntimeDetour;
+using R2API;
+using R2API.Utils;
+using RiskOfOptions;
+using RoR2;
+using RoR2.ContentManagement;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Security;
+using System.Security.Permissions;
+using UnityEngine;
+using UnityEngine.AddressableAssets;
+using UnityEngine.Networking;
+using UnityEngine.SceneManagement;
+using UnityEngine.UIElements;
+using static MonoMod.InlineRT.MonoModRule;
+
+[assembly: SecurityPermission(SecurityAction.RequestMinimum, SkipVerification = true)]
+[assembly: HG.Reflection.SearchableAttribute.OptIn]
+[assembly: HG.Reflection.SearchableAttribute.OptInAttribute]
+[module: UnverifiableCode]
+#pragma warning disable CS0618
+#pragma warning restore CS0618
+namespace PVPMod
+{
+    [BepInPlugin(ModGuid, ModName, ModVer)]
+    [BepInDependency(R2API.R2API.PluginGUID, R2API.R2API.PluginVersion)]
+    [BepInDependency(TeamsAPI.PluginGUID)]
+    [NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.EveryoneNeedSameModVersion)]
+    [System.Serializable]
+    public class PVPMod : BaseUnityPlugin
+    {
+        public const string ModGuid = "com.brynzananas.pvpmod";
+        public const string ModName = "PVP mod";
+        public const string ModVer = "1.0.0";
+        public static bool riskOfOptionsEnabled { get; private set; }
+        public static PVPMod instance { get; private set; }
+        public static BepInEx.PluginInfo PInfo { get; private set; }
+        public static ConfigFile configFile { get; private set; }
+        public static List<TeamIndex> playerTeamIndeces = [];
+        public static List<TeamDef> playerTeamDefs = [];
+        public static List<CharacterBody> activePVPBodies = [];
+        private static int _extraPlayerTeamsCount;
+        public static AssetBundle assetBundle { get; private set; }
+        public static PVPModItemDef StrongerDeathMark { get; private set; }
+        public static PVPModItemDef IncreaseDamageByShieldAndReduceShieldRechargeTime { get; private set; }
+        public static BuffDef StrongerDeathMarkBuff { get; private set; }
+        public static List<ConfigEntryBase> configs = [];
+        public static ConfigEntry<bool> EnablePVP;
+        public static ConfigEntry<bool> EnableContent;
+        public static ConfigEntry<int> PVPItemRewardAmount;
+        public static ConfigEntry<float> PVPItemRewardTier1Weight;
+        public static ConfigEntry<float> PVPItemRewardTier2Weight;
+        public static ConfigEntry<float> PVPItemRewardTier3Weight;
+        public static ConfigEntry<float> PVPItemRewardBossWeight;
+        public static ConfigEntry<float> PVPItemRewardEquipmentWeight;
+        public static ConfigEntry<float> PVPItemRewardLunarItemWeight;
+        public static ConfigEntry<float> PVPItemRewardLunarEquipmentWeight;
+        public static ConfigEntry<float> PVPItemRewardLunarCombinedWeight;
+        public static ConfigEntry<float> PVPItemRewardTier1VoidWeight;
+        public static ConfigEntry<float> PVPItemRewardTier2VoidWeight;
+        public static ConfigEntry<float> PVPItemRewardTier3VoidWeight;
+        public static ConfigEntry<float> PVPItemRewardBossVoidWeight;
+        public static ConfigEntry<int> StrongerDeathMarkMinimumDebuffsToTrigger;
+        public static ConfigEntry<bool> StrongerDeathMarkCountDebuffStacks;
+        public static ConfigEntry<float> StrongerDeathMarkDebuffDuration;
+        public static ConfigEntry<float> StrongerDeathMarkDebuffDurationPerStack;
+        public static ConfigEntry<float> StrongerDeathMarkDebuffDamageIncrease;
+        public static ConfigEntry<float> StrongerDeathMarkDebuffDamageIncreasePerStack;
+        public static ConfigEntry<float> IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplier;
+        public static ConfigEntry<float> IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplierPerStack;
+        public static ConfigEntry<float> IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease;
+        public static ConfigEntry<float> IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack;
+        public static BasicPickupDropTable PVPItemReward;
+        public static int extraPlayerTeamsCount
+        {
+            get => _extraPlayerTeamsCount;
+            set
+            {
+                if (_extraPlayerTeamsCount == value) return;
+                _extraPlayerTeamsCount = value;
+                Init();
+            }
+        }
+        public static bool pvpEnabled;
+        public void Awake()
+        {
+            instance = this;
+            PInfo = Info;
+            configFile = Config;
+            riskOfOptionsEnabled = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey(ModCompatabilities.RiskOfOptionsCompatAbility.ModGUID);
+            extraPlayerTeamsCount = 16;
+            SetHooks();
+            SetConfigs();
+            assetBundle = AssetBundle.LoadFromFileAsync(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(PInfo.Location), "assetbundles", "pvpmod")).assetBundle;
+            foreach (Material material in assetBundle.LoadAllAssets<Material>())
+            {
+                if (!material.shader.name.StartsWith("StubbedRoR2")) continue;
+                string shaderName = material.shader.name.Replace("StubbedRoR2", "RoR2") + ".shader";
+                Shader replacementShader = Addressables.LoadAssetAsync<Shader>(shaderName).WaitForCompletion();
+                if (replacementShader) material.shader = replacementShader;
+            }
+            PVPItemReward = assetBundle.LoadAsset<BasicPickupDropTable>("Assets/PVPmod/pdPVPItemReward.asset");
+            SetWeights();
+            StrongerDeathMark = assetBundle.LoadAsset<PVPModItemDef>("Assets/PVPmod/StrongerDeathMark.asset").RegisterItemDef(StrongerDeathMarkEvents);
+            IncreaseDamageByShieldAndReduceShieldRechargeTime = assetBundle.LoadAsset<PVPModItemDef>("Assets/PVPmod/IncreaseDamageByShieldAndReduceShieldRechargeTime.asset").RegisterItemDef(IncreaseDamageByShieldAndReduceShieldRechargeTimeEvents);
+            if (EnableContent.Value)
+                ContentManager.collectContentPackProviders += (addContentPackProvider) => addContentPackProvider(new PVPModContentPack());
+        }
+        public static void InitLanguageTokens()
+        {
+            Utils.AddLanguageToken(StrongerDeathMark.nameToken, "Chaotic Death Mark of Doom");
+            Utils.AddLanguageToken(StrongerDeathMark.pickupToken, $"Enemies with {Utils.damagePrefix}{StrongerDeathMarkMinimumDebuffsToTrigger.Value}{Utils.endPrefix} or more debuffs are marked for death, taking bonus damage.");
+            Utils.AddLanguageToken(StrongerDeathMark.descriptionToken, $"Enemies with {Utils.damagePrefix}{StrongerDeathMarkMinimumDebuffsToTrigger.Value}{Utils.endPrefix}, or more debuffs are {Utils.damagePrefix}marked for death{Utils.endPrefix}, increasing damage taken by {Utils.damagePrefix}{StrongerDeathMarkDebuffDamageIncrease.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{StrongerDeathMarkDebuffDamageIncreasePerStack.Value}% per stack){Utils.endPrefix} from all sources for {Utils.utilityPrefix}{StrongerDeathMarkDebuffDuration.Value}{Utils.endPrefix} {Utils.stackPrefix}(+{StrongerDeathMarkDebuffDuration.Value}% per stack){Utils.endPrefix} seconds.");
+            Utils.AddLanguageToken(IncreaseDamageByShieldAndReduceShieldRechargeTime.nameToken, "Still dont have a name");
+            Utils.AddLanguageToken(IncreaseDamageByShieldAndReduceShieldRechargeTime.pickupToken, "Increase damage by max shield and reduce shield recharge start time.");
+            Utils.AddLanguageToken(IncreaseDamageByShieldAndReduceShieldRechargeTime.descriptionToken, $"Deal {Utils.healingPrefix}{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplier.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplierPerStack.Value}% per stack){Utils.endPrefix} of your max shields as {Utils.damagePrefix}damage{Utils.endPrefix}. Reduce shield recharge start time by {Utils.utilityPrefix}{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack.Value}% per stack){Utils.endPrefix}.");
+        }
+        public static void SetConfigs()
+        {
+            EnablePVP = Utils.CreateConfig("Main", "Enable PVP", true, "Enable Players Versus Players after teleporter charge?");
+            EnableContent = Utils.CreateConfig("Main", "Enable content", true, "Enable all mod content?");
+            PVPItemRewardAmount = Utils.CreateConfig("PVP", "Item reward amount", 1, "Control how much items will be spawned on pvp win. Items spawn on the teleporter");
+            PVPItemRewardTier1Weight = Utils.CreateConfig("PVP", "Item reward common rarity weight", 100f, "Control weight for common rarity on random item reward selection");
+            PVPItemRewardTier2Weight = Utils.CreateConfig("PVP", "Item reward uncommon rarity weight", 0f, "Control weight for uncommon rarity on random item reward selection");
+            PVPItemRewardTier3Weight = Utils.CreateConfig("PVP", "Item reward legendary rarity weight", 0f, "Control weight for legendary rarity on random item reward selection");
+            PVPItemRewardBossWeight = Utils.CreateConfig("PVP", "Item reward boss rarity weight", 0f, "Control weight for boss rarity on random item reward selection");
+            PVPItemRewardEquipmentWeight = Utils.CreateConfig("PVP", "Item reward equipment rarity weight", 0f, "Control weight for equipment rarity on random item reward selection");
+            PVPItemRewardLunarItemWeight = Utils.CreateConfig("PVP", "Item reward lunar item rarity weight", 0f, "Control weight for lunar item rarity on random item reward selection");
+            PVPItemRewardLunarEquipmentWeight = Utils.CreateConfig("PVP", "Item reward lunar equipment rarity weight", 0f, "Control weight for lunar equipment rarity on random item reward selection");
+            PVPItemRewardLunarCombinedWeight = Utils.CreateConfig("PVP", "Item reward lunar combined rarity weight", 0f, "Control weight for lunar combined rarity on random item reward selection");
+            PVPItemRewardTier1VoidWeight = Utils.CreateConfig("PVP", "Item reward void common rarity weight", 0f, "Control weight for void common rarity on random item reward selection");
+            PVPItemRewardTier2VoidWeight = Utils.CreateConfig("PVP", "Item reward void uncommon rarity weight", 0f, "Control weight for void uncommon rarity on random item reward selection");
+            PVPItemRewardTier3VoidWeight = Utils.CreateConfig("PVP", "Item reward void legendary rarity weight", 0f, "Control weight for void legendary rarity on random item reward selection");
+            PVPItemRewardBossVoidWeight = Utils.CreateConfig("PVP", "Item reward void boss rarity weight", 0f, "Control weight for void boss rarity on random item reward selection");
+            PVPItemRewardTier1Weight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardTier2Weight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardTier3Weight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardBossWeight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardEquipmentWeight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardLunarItemWeight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardLunarEquipmentWeight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardLunarCombinedWeight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardTier1VoidWeight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardTier2VoidWeight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardTier3VoidWeight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            PVPItemRewardBossVoidWeight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+        }
+        private static void PVPItemRewardTier1Weight_SettingChanged(object sender, EventArgs e) => SetWeights();
+        public void OnDestroy()
+        {
+            UnsetHooks();
+        }
+        private static bool hooksSet;
+        private static void SetHooks()
+        {
+            if (hooksSet) return;
+            hooksSet = true;
+            TeleporterInteraction.onTeleporterChargedGlobal += TeleporterInteraction_onTeleporterChargedGlobal;
+            Stage.onServerStageBegin += Stage_onServerStageBegin;
+            TeamComponent.onJoinTeamGlobal += TeamComponent_onJoinTeamGlobal;
+            TeamComponent.onLeaveTeamGlobal += TeamComponent_onLeaveTeamGlobal;
+            GlobalEventManager.onCharacterDeathGlobal += GlobalEventManager_onCharacterDeathGlobal;
+            On.RoR2.TeamManager.SetTeamExperience += TeamManager_SetTeamExperience;
+            RoR2Application.onLoadFinished += InitLanguageTokens;
+        }
+        private static bool thisIsStupid;
+        private static void TeamManager_SetTeamExperience(On.RoR2.TeamManager.orig_SetTeamExperience orig, TeamManager self, TeamIndex teamIndex, ulong newExperience)
+        {
+            orig(self, teamIndex, newExperience);
+            if (thisIsStupid || !pvpEnabled || !playerTeamIndeces.Contains(teamIndex)) return;
+            thisIsStupid = true;
+            self.SetTeamExperience(TeamIndex.Player, newExperience);
+            foreach (TeamIndex teamIndex1 in playerTeamIndeces)
+            {
+                if (teamIndex1 == teamIndex) continue;
+                self.SetTeamExperience(teamIndex1, newExperience);
+            }
+        }
+
+        public static void SetWeights()
+        {
+            PVPItemReward.tier1Weight = PVPItemRewardTier1Weight.Value;
+            PVPItemReward.tier2Weight = PVPItemRewardTier2Weight.Value;
+            PVPItemReward.tier3Weight = PVPItemRewardTier3Weight.Value;
+            PVPItemReward.bossWeight = PVPItemRewardBossWeight.Value;
+            PVPItemReward.equipmentWeight = PVPItemRewardEquipmentWeight.Value;
+            PVPItemReward.lunarItemWeight = PVPItemRewardLunarItemWeight.Value;
+            PVPItemReward.lunarEquipmentWeight = PVPItemRewardLunarEquipmentWeight.Value;
+            PVPItemReward.lunarCombinedWeight = PVPItemRewardLunarCombinedWeight.Value;
+            PVPItemReward.voidTier1Weight = PVPItemRewardTier1VoidWeight.Value;
+            PVPItemReward.voidTier2Weight = PVPItemRewardTier2VoidWeight.Value;
+            PVPItemReward.voidTier3Weight = PVPItemRewardTier3VoidWeight.Value;
+            PVPItemReward.voidBossWeight = PVPItemRewardBossVoidWeight.Value;
+        }
+        private static void TeamComponent_onLeaveTeamGlobal(TeamComponent arg1, TeamIndex arg2)
+        {
+            CharacterBody characterBody = arg1.body;
+            if (characterBody == null || !playerTeamIndeces.Contains(arg2)) return;
+            if (!activePVPBodies.Contains(characterBody)) return;
+            activePVPBodies.Remove(characterBody);
+        }
+
+        private static void TeamComponent_onJoinTeamGlobal(TeamComponent arg1, TeamIndex arg2)
+        {
+            CharacterBody characterBody = arg1.body;
+            if (characterBody == null || !playerTeamIndeces.Contains(arg2)) return;
+            if (activePVPBodies.Contains(characterBody)) return;
+            activePVPBodies.Add(characterBody);
+        }
+
+        private static void GlobalEventManager_onCharacterDeathGlobal(DamageReport obj)
+        {
+            if (!pvpEnabled || !NetworkServer.active) return;
+            TeamIndex teamIndex = obj.victimTeamIndex;
+            if (!playerTeamIndeces.Contains(teamIndex)) return;
+            int alive = 0;
+            CharacterBody lastPlayer = null;
+            foreach (CharacterBody characterBody in activePVPBodies)
+            {
+                Debug.Log(characterBody);
+                if (characterBody == null || !characterBody.isPlayerControlled) continue;
+                bool isDead = characterBody.master ? characterBody.master.IsDeadAndOutOfLivesServer() : true;
+                if (isDead) continue;
+                lastPlayer = characterBody;
+                alive++;
+            }
+            if (alive > 1) return;
+            SpawnItems();
+            EndPVP();
+        }
+        public static void SpawnItems()
+        {
+            if (PVPItemRewardAmount.Value <= 0) return;
+            float num2 = 360f / PVPItemRewardAmount.Value;
+            Vector3 vector = Quaternion.AngleAxis(UnityEngine.Random.Range(0, 360), Vector3.up) * (Vector3.up * 40f + Vector3.forward * 5f);
+            Quaternion quaternion = Quaternion.AngleAxis(num2, Vector3.up);
+            for (int i = 0; i < PVPItemRewardAmount.Value; i++)
+            {
+                PickupIndex pickupIndex = PVPItemReward.GenerateDrop(Run.instance.bossRewardRng);
+                PickupDropletController.CreatePickupDroplet(pickupIndex, TeleporterInteraction.instance.bossGroup.dropPosition.position, vector);
+                vector = quaternion * vector;
+            }
+        }
+
+        private static void StrongerDeathMarkEvents(ItemDef itemDef)
+        {
+            StrongerDeathMarkBuff = assetBundle.LoadAsset<BuffDef>("Assets/PVPmod/bdStrongerDeathMark.asset").RegisterBuffDef(StrongerDeathMarkBuffEvents);
+            StrongerDeathMarkMinimumDebuffsToTrigger = Utils.CreateConfig(itemDef.name, "Minimum debuffs", 15, "Minimum debuffs needed for adding damage increase debuff on debuff addition");
+            StrongerDeathMarkCountDebuffStacks = Utils.CreateConfig(itemDef.name, "Count stacks", false, "Count debuff stacks for effect triggering");
+            StrongerDeathMarkDebuffDuration = Utils.CreateConfig(itemDef.name, "Debuff duration", 10f, "Control debuff duration in seconds");
+            StrongerDeathMarkDebuffDurationPerStack = Utils.CreateConfig(itemDef.name, "Debuff duration per stack", 5f, "Control debuff duration per stack in seconds");
+            StrongerDeathMarkDebuffDamageIncrease = Utils.CreateConfig(itemDef.name, "Debuff damage multiplier", 600f, "Control debuff taken damage multiplier in percentage");
+            StrongerDeathMarkDebuffDamageIncreasePerStack = Utils.CreateConfig(itemDef.name, "Debuff damage multiplier per stack", 300f, "Control debuff taken damage multiplier per stack in percentage");
+            StrongerDeathMarkMinimumDebuffsToTrigger.SettingChanged += StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged;
+            StrongerDeathMarkCountDebuffStacks.SettingChanged += StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged;
+            StrongerDeathMarkDebuffDuration.SettingChanged += StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged;
+            StrongerDeathMarkDebuffDurationPerStack.SettingChanged += StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged;
+            StrongerDeathMarkDebuffDamageIncrease.SettingChanged += StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged;
+            StrongerDeathMarkDebuffDamageIncreasePerStack.SettingChanged += StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged;
+            void StrongerDeathMarkBuffEvents(BuffDef buffDef)
+            {
+                On.RoR2.CharacterBody.HandleCascadingBuffs += CharacterBody_HandleCascadingBuffs;
+                void CharacterBody_HandleCascadingBuffs(On.RoR2.CharacterBody.orig_HandleCascadingBuffs orig, CharacterBody self)
+                {
+                    orig(self);
+                    int itemCount = Util.GetItemCountGlobal(itemDef.itemIndex, true, true) - (self.teamComponent ? Util.GetItemCountForTeam(self.teamComponent.teamIndex, itemDef.itemIndex, true, true) : (self.inventory ? self.inventory.GetItemCount(itemDef) : 0));
+                    if (itemCount <= 0) return;
+                    if (self.HasBuff(buffDef)) return;
+                    int num = 0;
+                    foreach (BuffIndex buffIndex in BuffCatalog.debuffBuffIndices) if (self.HasBuff(buffIndex)) num += StrongerDeathMarkCountDebuffStacks.Value ? self.GetBuffCount(buffIndex) : 1;
+                    if (num >= StrongerDeathMarkMinimumDebuffsToTrigger.Value) self.AddTimedBuff(buffDef, Utils.GetStackingFloat(StrongerDeathMarkDebuffDuration.Value, StrongerDeathMarkDebuffDurationPerStack.Value, itemCount));
+                }
+                IL.RoR2.HealthComponent.TakeDamageProcess += HealthComponent_TakeDamageProcess;
+                void HealthComponent_TakeDamageProcess(MonoMod.Cil.ILContext il)
+                {
+                    ILCursor c = new ILCursor(il);
+                    ILLabel iLLabel = null;
+                    int locId = 0;
+                    if (c.TryGotoNext(MoveType.After,
+                            x => x.MatchLdarg(0),
+                            x => x.MatchLdfld<HealthComponent>(nameof(HealthComponent.body)),
+                            x => x.MatchLdsfld(typeof(RoR2Content.Buffs), nameof(RoR2Content.Buffs.DeathMark)),
+                            x => x.MatchCallvirt<CharacterBody>(nameof(CharacterBody.HasBuff)),
+                            x => x.MatchBrfalse(out iLLabel),
+                            x => x.MatchLdloc(out locId)
+                        ))
+                    {
+                        c.GotoLabel(iLLabel, MoveType.Before);
+                        Instruction instruction = c.Emit(OpCodes.Ldarg_0).Prev;
+                        iLLabel.Target = instruction;
+                        c.Emit(OpCodes.Ldfld, AccessTools.Field(typeof(HealthComponent), nameof(HealthComponent.body)));
+                        c.Emit(OpCodes.Ldarg_1);
+                        c.EmitDelegate(HandleStrongerDeathMark);
+                        float HandleStrongerDeathMark(CharacterBody characterBody, DamageInfo damageInfo)
+                        {
+                            if (!characterBody.HasBuff(buffDef) || damageInfo.attacker == null) return 1f;
+                            CharacterBody attackerBody = damageInfo.attacker.GetComponent<CharacterBody>();
+                            if (attackerBody == null) return StrongerDeathMarkDebuffDamageIncrease.Value / 100f + 1f;
+                            Inventory inventory = attackerBody.inventory;
+                            if (inventory == null) return StrongerDeathMarkDebuffDamageIncrease.Value / 100f + 1f;
+                            int itemCount = inventory.GetItemCount(itemDef);
+                            if (itemCount <= 0) return StrongerDeathMarkDebuffDamageIncrease.Value / 100f + 1f;
+                            return Utils.GetStackingFloat(StrongerDeathMarkDebuffDamageIncrease.Value, StrongerDeathMarkDebuffDamageIncreasePerStack.Value, itemCount) / 100f + 1f;
+                        }
+                        c.Emit(OpCodes.Ldloc, locId);
+                        c.Emit(OpCodes.Mul);
+                        c.Emit(OpCodes.Stloc, locId);
+                    }
+                    else
+                    {
+                        instance.Logger.LogError(il.Method.Name + " IL Hook failed!");
+                    }
+                }
+            }
+            
+        }
+
+        private static void StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged(object sender, EventArgs e) => InitLanguageTokens();
+
+        private static void IncreaseDamageByShieldAndReduceShieldRechargeTimeEvents(ItemDef itemDef)
+        {
+            IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplier = Utils.CreateConfig(itemDef.name, "Max shield to damage multiplier", 5f, "Control max shield to damage multiplier in percentage");
+            IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplierPerStack = Utils.CreateConfig(itemDef.name, "Max shield to damage multiplier per stack", 2.5f, "Control max shield to damage multiplier per stack in percentage");
+            IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease = Utils.CreateConfig(itemDef.name, "Shield regen cooldown reduction", 30f, "Control shield regeneration cooldown reduction in percentage");
+            IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack = Utils.CreateConfig(itemDef.name, "Shield regen cooldown reduction per stack", 15f, "Control shield regeneration cooldown reduction in percentage");
+            IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplier.SettingChanged += StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged;
+            IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplierPerStack.SettingChanged += StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged;
+            IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease.SettingChanged += StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged;
+            IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack.SettingChanged += StrongerDeathMarkMinimumDebuffsToTrigger_SettingChanged;
+            IL.RoR2.HealthComponent.TakeDamageProcess += HealthComponent_TakeDamageProcess;
+            void HealthComponent_TakeDamageProcess(MonoMod.Cil.ILContext il)
+            {
+                ILCursor c = new ILCursor(il);
+                ILLabel iLLabel = null;
+                int locId = 0;
+                if (c.TryGotoNext(MoveType.After,
+                        x => x.MatchLdarg(0),
+                        x => x.MatchLdfld<HealthComponent>(nameof(HealthComponent.body)),
+                        x => x.MatchLdsfld(typeof(RoR2Content.Buffs), nameof(RoR2Content.Buffs.DeathMark)),
+                        x => x.MatchCallvirt<CharacterBody>(nameof(CharacterBody.HasBuff)),
+                        x => x.MatchBrfalse(out iLLabel),
+                        x => x.MatchLdloc(out locId)
+                    ))
+                {
+                    c.GotoLabel(iLLabel, MoveType.Before);
+                    Instruction instruction = c.Emit(OpCodes.Ldarg_0).Prev;
+                    iLLabel.Target = instruction;
+                    c.Emit(OpCodes.Ldfld, AccessTools.Field(typeof(HealthComponent), nameof(HealthComponent.body)));
+                    c.Emit(OpCodes.Ldarg_1);
+                    c.EmitDelegate(HandleIncreaseDamageByShieldAndReduceShieldRechargeTime);
+                    float HandleIncreaseDamageByShieldAndReduceShieldRechargeTime(CharacterBody characterBody, DamageInfo damageInfo)
+                    {
+                        if (damageInfo.attacker == null) return 1f;
+                        CharacterBody attackerBody = damageInfo.attacker.GetComponent<CharacterBody>();
+                        if (attackerBody == null) return 1f;
+                        Inventory inventory = attackerBody.inventory;
+                        if (inventory == null) return attackerBody.maxShield * IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplier.Value / 100f + 1f;
+                        int itemCount = inventory.GetItemCount(itemDef);
+                        if (itemCount <= 0) return attackerBody.maxShield * IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplier.Value / 100f + 1f;
+                        return attackerBody.maxShield * Utils.GetStackingFloat(IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplier.Value, IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplierPerStack.Value, itemCount) / 100f + 1f;
+                    }
+                    c.Emit(OpCodes.Ldloc, locId);
+                    c.Emit(OpCodes.Add);
+                    c.Emit(OpCodes.Stloc, locId);
+                }
+                else
+                {
+                    instance.Logger.LogError(il.Method.Name + " IL Hook failed!");
+                }
+            }
+            On.RoR2.CharacterBody.OnInventoryChanged += CharacterBody_OnInventoryChanged;
+            void CharacterBody_OnInventoryChanged(On.RoR2.CharacterBody.orig_OnInventoryChanged orig, CharacterBody self)
+            {
+                orig(self);
+                if (NetworkServer.active)
+                    self.AddItemBehavior<IncreaseDamageByShieldAndReduceShieldRechargeTimeBehaviour>(self.inventory ? self.inventory.GetItemCount(itemDef) : 0);
+            }
+        }
+
+        private static void UnsetHooks()
+        {
+            if (!hooksSet) return;
+            hooksSet = false;
+            TeleporterInteraction.onTeleporterChargedGlobal -= TeleporterInteraction_onTeleporterChargedGlobal;
+            Stage.onServerStageBegin -= Stage_onServerStageBegin;
+            TeamComponent.onJoinTeamGlobal -= TeamComponent_onJoinTeamGlobal;
+            TeamComponent.onLeaveTeamGlobal -= TeamComponent_onLeaveTeamGlobal;
+            GlobalEventManager.onCharacterDeathGlobal -= GlobalEventManager_onCharacterDeathGlobal;
+            On.RoR2.TeamManager.SetTeamExperience -= TeamManager_SetTeamExperience;
+            RoR2Application.onLoadFinished -= InitLanguageTokens;
+        }
+        private static void Stage_onServerStageBegin(Stage obj) => EndPVP();
+        private static void TeleporterInteraction_onTeleporterChargedGlobal(TeleporterInteraction obj) => BeginPVP();
+        public static void BeginPVP()
+        {
+            if (!NetworkServer.active || pvpEnabled || !EnablePVP.Value) return;
+            int playersCount = PlayerCharacterMasterController.instances.Count;
+            if (playersCount <= 1) return;
+            int readyTeamsCount = playerTeamDefs.Count;
+            int j = 0;
+            for (int i = 0; i < readyTeamsCount; i++)
+            {
+                TeamIndex teamIndex = playerTeamIndeces[i];
+                TeamManager.instance.SetTeamExperience(teamIndex, TeamManager.instance.GetTeamExperience(TeamIndex.Player));
+            }
+            for (int i = 0; i < playersCount; i++, j++)
+            {
+                PlayerCharacterMasterController playerCharacterMasterController = PlayerCharacterMasterController.instances[i];
+                if (playerCharacterMasterController == null) continue;
+                CharacterMaster characterMaster = playerCharacterMasterController.master;
+                if (characterMaster == null) continue;
+                TeamIndex teamIndex = TeamIndex.None;
+                while (j > readyTeamsCount - 1) j -= extraPlayerTeamsCount;
+                teamIndex = playerTeamIndeces[j];
+                TeamComponent teamComponent = characterMaster.GetBody() ? characterMaster.GetBody().teamComponent : null;
+                if (teamComponent) teamComponent.teamIndex = teamIndex;
+                characterMaster.teamIndex = teamIndex;
+                ChangeMinionsTeam(playerCharacterMasterController, teamIndex);
+            }
+            pvpEnabled = true;
+        }
+        public static void EndPVP()
+        {
+            if (!NetworkServer.active || !pvpEnabled) return;
+            int playersCount = PlayerCharacterMasterController.instances.Count;
+            if (playersCount <= 1) return;
+            int readyTeamsCount = playerTeamDefs.Count;
+            for (int i = 0; i < playersCount; i++)
+            {
+                PlayerCharacterMasterController playerCharacterMasterController = PlayerCharacterMasterController.instances[i];
+                if (playerCharacterMasterController == null) continue;
+                CharacterMaster characterMaster = playerCharacterMasterController.master;
+                if (characterMaster == null) continue;
+                TeamIndex teamIndex = TeamIndex.Player;
+                TeamComponent teamComponent = characterMaster.GetBody() ? characterMaster.GetBody().teamComponent : null;
+                if (teamComponent) teamComponent.teamIndex = teamIndex;
+                characterMaster.teamIndex = teamIndex;
+                ChangeMinionsTeam(playerCharacterMasterController, teamIndex);
+            }
+            pvpEnabled = false;
+        }
+        public static void ChangeMinionsTeam(PlayerCharacterMasterController playerCharacterMasterController, TeamIndex teamIndex)
+        {
+            MinionOwnership.MinionGroup minionGroup = null;
+            for (int i = 0; i < MinionOwnership.MinionGroup.instancesList.Count; i++)
+            {
+                MinionOwnership.MinionGroup minionGroup2 = MinionOwnership.MinionGroup.instancesList[i];
+                if (MinionOwnership.MinionGroup.instancesList[i].ownerId == playerCharacterMasterController.netId)
+                {
+                    minionGroup = minionGroup2;
+                    break;
+                }
+            }
+            if (minionGroup == null) return;
+            foreach (MinionOwnership minion in minionGroup.members)
+            {
+                if (minion == null) continue;
+                CharacterMaster characterMaster = minion.GetComponent<CharacterMaster>();
+                if (characterMaster == null) continue;
+                characterMaster.teamIndex = teamIndex;
+                CharacterBody characterBody = characterMaster.GetBody();
+                if (characterBody == null) continue;
+                TeamComponent teamComponent = characterBody.teamComponent;
+                if (teamComponent == null) continue;
+                teamComponent.teamIndex = teamIndex;
+            }
+        }
+        public void FixedUpdate()
+        {
+            if (Run.instance == null) return;
+            TeamDef playerTeamDef = TeamCatalog.teamDefs[1];
+            foreach (TeamDef teamDef in playerTeamDefs)
+            {
+                teamDef.softCharacterLimit = playerTeamDef.softCharacterLimit;
+                teamDef.friendlyFireScaling = playerTeamDef.friendlyFireScaling;
+                teamDef.levelUpEffect = playerTeamDef.levelUpEffect;
+                teamDef.nameToken = playerTeamDef.nameToken;
+            }
+        }
+        public static void Init()
+        {
+            playerTeamDefs.Clear();
+            playerTeamIndeces.Clear();
+            for (int i = 0; i < extraPlayerTeamsCount; i++) CreateTeam("Player" + (i + 1));
+        }
+        public static TeamIndex CreateTeam(string name)
+        {
+            TeamsAPI.TeamBehavior teamBehavior = new(name, TeamsAPI.TeamClassification.Player);
+            string nameToken = "TEAM_" + name.ToUpper() + "_NAME";
+            TeamDef teamDef = new()
+            {
+                softCharacterLimit = 20,
+                friendlyFireScaling = 0.5f,
+                levelUpEffect = null,
+                nameToken = "TEAM_PLAYER_NAME"
+            };
+            TeamIndex teamIndex = TeamsAPI.RegisterTeam(teamDef, teamBehavior);
+            playerTeamDefs.Add(teamDef);
+            playerTeamIndeces.Add(teamIndex);
+            return teamIndex;
+        }
+    }
+    public class IncreaseDamageByShieldAndReduceShieldRechargeTimeBehaviour : CharacterBody.ItemBehavior
+    {
+        public void FixedUpdate()
+        {
+            HealthComponent healthComponent = body.healthComponent;
+            if (healthComponent == null || healthComponent.isShieldRegenForced) return;
+            float divisor = Utils.GetStackingFloat(PVPMod.IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease.Value, PVPMod.IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack.Value, stack) / 100f + 1f;
+            float finalValue = CharacterBody.outOfDangerDelay / divisor;
+            if (body.outOfDangerStopwatch >= finalValue)
+            {
+                healthComponent.ForceShieldRegen();
+                Util.PlaySound("Play_item_proc_personal_shield_recharge", gameObject);
+            }
+        }
+    }
+    [CreateAssetMenu(menuName = "PVPMod/PVPModItemDef")]
+    public class PVPModItemDef : ItemDef
+    {
+        public ItemTierSprite[] itemTierSprites;
+        [Serializable]
+        public struct ItemTierSprite
+        {
+            public ItemTier itemTier;
+            public Sprite sprite;
+        }
+    }
+    public class PVPModContentPack : IContentPackProvider
+    {
+        internal ContentPack contentPack = new ContentPack();
+        public string identifier => PVPMod.ModGuid + ".ContentProvider";
+        public static List<ItemDef> items = [];
+        public static List<BuffDef> buffs = [];
+        public IEnumerator FinalizeAsync(FinalizeAsyncArgs args)
+        {
+            args.ReportProgress(1f);
+            yield break;
+        }
+
+        public IEnumerator GenerateContentPackAsync(GetContentPackAsyncArgs args)
+        {
+            ContentPack.Copy(this.contentPack, args.output);
+            args.ReportProgress(1f);
+            yield break;
+        }
+
+        public IEnumerator LoadStaticContentAsync(LoadStaticContentAsyncArgs args)
+        {
+            this.contentPack.identifier = this.identifier;
+            contentPack.itemDefs.Add([.. items]);
+            contentPack.buffDefs.Add([.. buffs]);
+            yield break;
+        }
+    }
+    public static class Utils
+    {
+        public const string damagePrefix = "<style=cIsDamage>";
+        public const string stackPrefix = "<style=cStack>";
+        public const string utilityPrefix = "<style=cIsUtility>";
+        public const string healingPrefix = "<style=cIsHealing>";
+        public const string endPrefix = "</style>";
+        public static void AddLanguageToken(string token, string value) => AddLanguageToken(token, value, "en");
+        public static void AddLanguageToken(string token, string value, string language)
+        {
+            Language language1 = Language.languagesByName[language];
+            if (language1.stringsByToken.ContainsKey(token))
+            {
+                language1.stringsByToken[token] = value;
+            }
+            else
+            {
+                language1.stringsByToken.Add(token, value);
+            }
+        }
+        public static ConfigEntry<T> CreateConfig<T>(string section, string field, T defaultValue, string description) => CreateConfig(section, field, defaultValue, description, false);
+        public static ConfigEntry<T> CreateConfig<T>(string section, string field, T defaultValue, string description, bool riskOfOptionsRestartRequired)
+        {
+            ConfigEntry<T> configEntry = PVPMod.configFile.Bind(section, field, defaultValue, description);
+            if (PVPMod.riskOfOptionsEnabled) ModCompatabilities.RiskOfOptionsCompatAbility.HandleConfig(configEntry, defaultValue, riskOfOptionsRestartRequired);
+            PVPMod.configs.Add(configEntry);
+            return configEntry;
+        }
+        public static T RegisterItemDef<T>(this T itemDef, Action<ItemDef> onItemDefAdded = null) where T : ItemDef
+        {
+            ConfigEntry<bool> enableConfig = CreateConfig(itemDef.name, "Enable", true, "Enable this item?", true);
+            ConfigEntry<ItemTier> tierConfig = CreateConfig(itemDef.name, "Rarity", itemDef.tier, "Control rarity of this item", true);
+            PVPModItemDef pVPModItemDef = itemDef as PVPModItemDef;
+            if (pVPModItemDef)
+            {
+                foreach (PVPModItemDef.ItemTierSprite itemTierSprite in pVPModItemDef.itemTierSprites)
+                {
+                    if (itemTierSprite.itemTier == tierConfig.Value)
+                    {
+                        pVPModItemDef.pickupIconSprite = itemTierSprite.sprite;
+                        pVPModItemDef.deprecatedTier = tierConfig.Value;
+                        break;
+                    }
+                }
+            }
+            if (enableConfig == null || enableConfig.Value == true)
+            {
+                PVPModContentPack.items.Add(itemDef);
+                onItemDefAdded?.Invoke(itemDef);
+            }
+            return itemDef;
+        }
+        public static T RegisterBuffDef<T>(this T buffDef, Action<BuffDef> onBuffDefAdded = null) where T : BuffDef
+        {
+            PVPModContentPack.buffs.Add(buffDef);
+            onBuffDefAdded?.Invoke(buffDef);
+            return buffDef;
+        }
+        public static float GetStackingFloat(float baseValue, float stackValue, int stacks) => baseValue + (stacks - 1) * stackValue;
+    }
+    public static class ModCompatabilities
+    {
+        public static class RiskOfOptionsCompatAbility
+        {
+            public const string ModGUID = "com.rune580.riskofoptions";
+            public static void HandleConfig<T>(ConfigEntry<T> configEntry, T value, bool restartRequired)
+            {
+                if (value is int) ModSettingsManager.AddOption(new RiskOfOptions.Options.IntFieldOption(configEntry as ConfigEntry<int>));
+                if (value is float) ModSettingsManager.AddOption(new RiskOfOptions.Options.FloatFieldOption(configEntry as ConfigEntry<float>));
+                if (value is bool) ModSettingsManager.AddOption(new RiskOfOptions.Options.CheckBoxOption(configEntry as ConfigEntry<bool>));
+            }
+        }
+    }
+}

@@ -1,0 +1,31 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>netstandard2.1</TargetFramework>
+		<LangVersion>preview</LangVersion>
+		<ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+		<BaseOutputPath>D:\r2modman\RiskOfRain2\profiles\my_mod\BepInEx\plugins\PVPMod</BaseOutputPath>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+		<NoWarn>1701;1702;CS0618;CS0612</NoWarn>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="BepInEx.Core" Version="5.4.21" />
+		<PackageReference Include="MMHOOK.RoR2" Version="2025.6.3" NoWarn="NU1701" />
+		<PackageReference Include="R2API.DamageType" Version="1.1.7" />
+		<PackageReference Include="R2API.ProcType" Version="1.0.2" />
+		<PackageReference Include="MonoMod.Backports" Version="1.1.2" />
+		<PackageReference Include="R2API.Rules" Version="1.0.1" />
+		<PackageReference Include="R2API.Skills" Version="1.0.1" />
+		<PackageReference Include="R2API.Teams" Version="1.0.0" />
+		<PackageReference Include="RiskOfRain2.GameLibs" Version="1.3.9-r.0" />
+		<PackageReference Include="UnityEngine.Modules" Version="2021.3.33" />
+		<PackageReference Include="R2API" Version="5.0.5" />
+		<PackageReference Include="Rune580.Mods.RiskOfRain2.RiskOfOptions" Version="2.8.2" />
+		<PackageReference Include="MetrosexualFruitcake-CustomEmotesAPI" Version="1.6.3" />
+	</ItemGroup>
+
+
+</Project>
