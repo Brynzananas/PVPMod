@@ -36,13 +36,13 @@ namespace PVPMod
     [BepInDependency(TeamsAPI.PluginGUID)]
     [NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.EveryoneNeedSameModVersion)]
     [System.Serializable]
-    public class PVPMod : BaseUnityPlugin
+    public class PVPModPlugin : BaseUnityPlugin
     {
         public const string ModGuid = "com.brynzananas.pvpmod";
         public const string ModName = "PVP mod";
         public const string ModVer = "1.0.0";
         public static bool riskOfOptionsEnabled { get; private set; }
-        public static PVPMod instance { get; private set; }
+        public static PVPModPlugin instance { get; private set; }
         public static BepInEx.PluginInfo PInfo { get; private set; }
         public static ConfigFile configFile { get; private set; }
         public static List<TeamIndex> playerTeamIndeces = [];
@@ -69,6 +69,9 @@ namespace PVPMod
         public static ConfigEntry<float> PVPItemRewardTier2VoidWeight;
         public static ConfigEntry<float> PVPItemRewardTier3VoidWeight;
         public static ConfigEntry<float> PVPItemRewardBossVoidWeight;
+        public static ConfigEntry<int> PVPLoserLoseItemsAmount;
+        public static ConfigEntry<ItemTier> PVPLoserLoseItemsRarity;
+        public static ConfigEntry<int> PVPLoserSpinelAfflictionsAmount;
         public static ConfigEntry<int> StrongerDeathMarkMinimumDebuffsToTrigger;
         public static ConfigEntry<bool> StrongerDeathMarkCountDebuffStacks;
         public static ConfigEntry<float> StrongerDeathMarkDebuffDuration;
@@ -141,6 +144,9 @@ namespace PVPMod
             PVPItemRewardTier2VoidWeight = Utils.CreateConfig("PVP", "Item reward void uncommon rarity weight", 0f, "Control weight for void uncommon rarity on random item reward selection");
             PVPItemRewardTier3VoidWeight = Utils.CreateConfig("PVP", "Item reward void legendary rarity weight", 0f, "Control weight for void legendary rarity on random item reward selection");
             PVPItemRewardBossVoidWeight = Utils.CreateConfig("PVP", "Item reward void boss rarity weight", 0f, "Control weight for void boss rarity on random item reward selection");
+            PVPLoserLoseItemsAmount = Utils.CreateConfig("PVP", "Lose items amount", 1, "Control how much items PVP losers will lose?");
+            PVPLoserLoseItemsRarity = Utils.CreateConfig("PVP", "Lose items rarity", ItemTier.Tier1, "Control which rarity of an item would be removed on PVP lose?");
+            PVPLoserSpinelAfflictionsAmount = Utils.CreateConfig("PVP", "Gain Tonic Affliction", 1, "Control how much Tonic Afflictions PVP losers will get?");
             PVPItemRewardTier1Weight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
             PVPItemRewardTier2Weight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
             PVPItemRewardTier3Weight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
@@ -445,6 +451,34 @@ namespace PVPMod
                 if (teamComponent) teamComponent.teamIndex = teamIndex;
                 characterMaster.teamIndex = teamIndex;
                 ChangeMinionsTeam(playerCharacterMasterController, teamIndex);
+                Inventory inventory = characterMaster.inventory;
+                if (!inventory) continue;
+                if (!characterMaster.IsDeadAndOutOfLivesServer()) continue;
+                int tonicAfflictionAmount = PVPLoserSpinelAfflictionsAmount.Value;
+                if (tonicAfflictionAmount > 0)
+                    inventory.GiveItem(RoR2Content.Items.TonicAffliction, tonicAfflictionAmount);
+                List<ItemDef> list = [];
+                int itemCount = 0;
+                for (int j = 0; j < ItemCatalog.itemCount; j++)
+                {
+                    int itemStacks = inventory.itemStacks[j];
+                    if (itemStacks <= 0) continue;
+                    ItemDef itemDef = ItemCatalog.GetItemDef((ItemIndex)j);
+                    if (itemDef == null || !itemDef.canRemove || itemDef.tier != PVPLoserLoseItemsRarity.Value) continue;
+                    for (int k = 0; k < itemStacks; k++)
+                    {
+                        list.Add(itemDef);
+                        itemCount++;
+                    }
+                }
+                int loseItemsAmount = PVPLoserLoseItemsAmount.Value;
+                for (int j = 0; j < loseItemsAmount && itemCount > 0; j++)
+                {
+                    ItemDef itemDef = list[UnityEngine.Random.Range(0, itemCount)];
+                    inventory.RemoveItem(itemDef);
+                    list.Remove(itemDef);
+                    itemCount--;
+                }
             }
             pvpEnabled = false;
         }
@@ -515,7 +549,7 @@ namespace PVPMod
         {
             HealthComponent healthComponent = body.healthComponent;
             if (healthComponent == null || healthComponent.isShieldRegenForced) return;
-            float divisor = Utils.GetStackingFloat(PVPMod.IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease.Value, PVPMod.IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack.Value, stack) / 100f + 1f;
+            float divisor = Utils.GetStackingFloat(PVPModPlugin.IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease.Value, PVPModPlugin.IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack.Value, stack) / 100f + 1f;
             float finalValue = CharacterBody.outOfDangerDelay / divisor;
             if (body.outOfDangerStopwatch >= finalValue)
             {
@@ -538,7 +572,7 @@ namespace PVPMod
     public class PVPModContentPack : IContentPackProvider
     {
         internal ContentPack contentPack = new ContentPack();
-        public string identifier => PVPMod.ModGuid + ".ContentProvider";
+        public string identifier => PVPModPlugin.ModGuid + ".ContentProvider";
         public static List<ItemDef> items = [];
         public static List<BuffDef> buffs = [];
         public IEnumerator FinalizeAsync(FinalizeAsyncArgs args)
@@ -585,9 +619,9 @@ namespace PVPMod
         public static ConfigEntry<T> CreateConfig<T>(string section, string field, T defaultValue, string description) => CreateConfig(section, field, defaultValue, description, false);
         public static ConfigEntry<T> CreateConfig<T>(string section, string field, T defaultValue, string description, bool riskOfOptionsRestartRequired)
         {
-            ConfigEntry<T> configEntry = PVPMod.configFile.Bind(section, field, defaultValue, description);
-            if (PVPMod.riskOfOptionsEnabled) ModCompatabilities.RiskOfOptionsCompatAbility.HandleConfig(configEntry, defaultValue, riskOfOptionsRestartRequired);
-            PVPMod.configs.Add(configEntry);
+            ConfigEntry<T> configEntry = PVPModPlugin.configFile.Bind(section, field, defaultValue, description);
+            if (PVPModPlugin.riskOfOptionsEnabled) ModCompatabilities.RiskOfOptionsCompatAbility.HandleConfig(configEntry, defaultValue, riskOfOptionsRestartRequired);
+            PVPModPlugin.configs.Add(configEntry);
             return configEntry;
         }
         public static T RegisterItemDef<T>(this T itemDef, Action<ItemDef> onItemDefAdded = null) where T : ItemDef
