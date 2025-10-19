@@ -9,13 +9,17 @@ using MonoMod.RuntimeDetour;
 using R2API;
 using R2API.Utils;
 using RiskOfOptions;
+using RiskOfOptions.Options;
 using RoR2;
 using RoR2.ContentManagement;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using System.Security;
 using System.Security.Permissions;
+using TMPro;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.Networking;
@@ -112,6 +116,7 @@ namespace PVPMod
                 if (replacementShader) material.shader = replacementShader;
             }
             PVPItemReward = assetBundle.LoadAsset<BasicPickupDropTable>("Assets/PVPmod/pdPVPItemReward.asset");
+            PVPCountdownPrefab = assetBundle.LoadAsset<GameObject>("Assets/PVPmod/PVPCountdown.prefab");
             SetWeights();
             StrongerDeathMark = assetBundle.LoadAsset<PVPModItemDef>("Assets/PVPmod/StrongerDeathMark.asset").RegisterItemDef(StrongerDeathMarkEvents);
             IncreaseDamageByShieldAndReduceShieldRechargeTime = assetBundle.LoadAsset<PVPModItemDef>("Assets/PVPmod/IncreaseDamageByShieldAndReduceShieldRechargeTime.asset").RegisterItemDef(IncreaseDamageByShieldAndReduceShieldRechargeTimeEvents);
@@ -405,7 +410,17 @@ namespace PVPMod
             RoR2Application.onLoadFinished -= InitLanguageTokens;
         }
         private static void Stage_onServerStageBegin(Stage obj) => EndPVP();
-        private static void TeleporterInteraction_onTeleporterChargedGlobal(TeleporterInteraction obj) => BeginPVP();
+        private static void TeleporterInteraction_onTeleporterChargedGlobal(TeleporterInteraction obj) => StartPVP();
+        public static bool startingPVP = false;
+        public static float startingStopwatch;
+        public static GameObject PVPCountdownPrefab;
+        public static void StartPVP()
+        {
+            if (!EnablePVP.Value) return;
+            startingPVP = true;
+            startingStopwatch = 3f;
+            Instantiate(PVPCountdownPrefab);
+        }
         public static void BeginPVP()
         {
             if (!NetworkServer.active || pvpEnabled || !EnablePVP.Value) return;
@@ -481,6 +496,7 @@ namespace PVPMod
                 }
             }
             pvpEnabled = false;
+            startingPVP = false;
         }
         public static void ChangeMinionsTeam(PlayerCharacterMasterController playerCharacterMasterController, TeamIndex teamIndex)
         {
@@ -510,6 +526,15 @@ namespace PVPMod
         }
         public void FixedUpdate()
         {
+            if (startingPVP)
+            {
+                startingStopwatch -= Time.fixedDeltaTime;
+                if (startingStopwatch <= 0f)
+                {
+                    BeginPVP();
+                    startingPVP = false;
+                }
+            }
             if (Run.instance == null) return;
             TeamDef playerTeamDef = TeamCatalog.teamDefs[1];
             foreach (TeamDef teamDef in playerTeamDefs)
@@ -558,6 +583,24 @@ namespace PVPMod
             }
         }
     }
+    public class PVPCountdown : MonoBehaviour
+    {
+        public TextMeshProUGUI textMeshProUGUI;
+        public float countdown = 3f;
+        public void Update()
+        {
+            countdown -= Time.deltaTime;
+            if (countdown <= -1f)
+            {
+                Destroy(gameObject);
+            }
+            if (textMeshProUGUI)
+            {
+                textMeshProUGUI.text = countdown > 0 ? "PVP STARTS IN " + Mathf.Ceil(countdown) : "FIGHT!";
+            }
+        }
+    }
+
     [CreateAssetMenu(menuName = "PVPMod/PVPModItemDef")]
     public class PVPModItemDef : ItemDef
     {
@@ -663,9 +706,16 @@ namespace PVPMod
             public const string ModGUID = "com.rune580.riskofoptions";
             public static void HandleConfig<T>(ConfigEntry<T> configEntry, T value, bool restartRequired)
             {
-                if (value is int) ModSettingsManager.AddOption(new RiskOfOptions.Options.IntFieldOption(configEntry as ConfigEntry<int>));
-                if (value is float) ModSettingsManager.AddOption(new RiskOfOptions.Options.FloatFieldOption(configEntry as ConfigEntry<float>));
-                if (value is bool) ModSettingsManager.AddOption(new RiskOfOptions.Options.CheckBoxOption(configEntry as ConfigEntry<bool>));
+                if (value is float) ModSettingsManager.AddOption(new FloatFieldOption(configEntry as ConfigEntry<float>, restartRequired));
+                if (value is bool)ModSettingsManager.AddOption(new CheckBoxOption(configEntry as ConfigEntry<bool>, restartRequired));
+                if (value is int)ModSettingsManager.AddOption(new IntFieldOption(configEntry as ConfigEntry<int>, restartRequired));
+                if (value is string)ModSettingsManager.AddOption(new StringInputFieldOption(configEntry as ConfigEntry<string>, restartRequired));
+                if (value is Enum)
+                {
+                    Enum @enum = value as Enum;
+                    if (@enum.GetType().GetCustomAttributes<FlagsAttribute>().Any()) return;
+                    ModSettingsManager.AddOption(new ChoiceOption(configEntry, restartRequired));
+                }
             }
         }
     }
