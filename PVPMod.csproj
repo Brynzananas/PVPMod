@@ -16,7 +16,6 @@
 		<PackageReference Include="MMHOOK.RoR2" Version="2025.6.3" NoWarn="NU1701" />
 		<PackageReference Include="R2API.DamageType" Version="1.1.7" />
 		<PackageReference Include="R2API.ProcType" Version="1.0.2" />
-		<PackageReference Include="MonoMod.Backports" Version="1.1.2" />
 		<PackageReference Include="R2API.Rules" Version="1.0.1" />
 		<PackageReference Include="R2API.Skills" Version="1.0.1" />
 		<PackageReference Include="R2API.Teams" Version="1.0.0" />
