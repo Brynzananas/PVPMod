@@ -42,6 +42,7 @@ namespace PVPMod
     [BepInDependency(R2API.R2API.PluginGUID, R2API.R2API.PluginVersion)]
     [BepInDependency(TeamsAPI.PluginGUID, TeamsAPI.PluginVersion)]
     [BepInDependency(NetworkingAPI.PluginGUID, NetworkingAPI.PluginVersion)]
+    [BepInDependency(ModCompatabilities.RiskOfOptionsCompatAbility.ModGUID, BepInDependency.DependencyFlags.SoftDependency)]
     [NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.EveryoneNeedSameModVersion)]
     [System.Serializable]
     public class PVPModPlugin : BaseUnityPlugin
