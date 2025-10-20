@@ -7,11 +7,14 @@ using Mono.Cecil.Cil;
 using MonoMod.Cil;
 using MonoMod.RuntimeDetour;
 using R2API;
+using R2API.Networking;
+using R2API.Networking.Interfaces;
 using R2API.Utils;
 using RiskOfOptions;
 using RiskOfOptions.Options;
 using RoR2;
 using RoR2.ContentManagement;
+using RoR2.ExpansionManagement;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -37,7 +40,8 @@ namespace PVPMod
 {
     [BepInPlugin(ModGuid, ModName, ModVer)]
     [BepInDependency(R2API.R2API.PluginGUID, R2API.R2API.PluginVersion)]
-    [BepInDependency(TeamsAPI.PluginGUID)]
+    [BepInDependency(TeamsAPI.PluginGUID, TeamsAPI.PluginVersion)]
+    [BepInDependency(NetworkingAPI.PluginGUID, NetworkingAPI.PluginVersion)]
     [NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.EveryoneNeedSameModVersion)]
     [System.Serializable]
     public class PVPModPlugin : BaseUnityPlugin
@@ -60,6 +64,7 @@ namespace PVPMod
         public static List<ConfigEntryBase> configs = [];
         public static ConfigEntry<bool> EnablePVP;
         public static ConfigEntry<bool> EnableContent;
+        public static ConfigEntry<float> PVPCountdownTimer;
         public static ConfigEntry<int> PVPItemRewardAmount;
         public static ConfigEntry<float> PVPItemRewardTier1Weight;
         public static ConfigEntry<float> PVPItemRewardTier2Weight;
@@ -87,6 +92,7 @@ namespace PVPMod
         public static ConfigEntry<float> IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease;
         public static ConfigEntry<float> IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack;
         public static BasicPickupDropTable PVPItemReward;
+        public static ExpansionDef DLC1Expansion;
         public static int extraPlayerTeamsCount
         {
             get => _extraPlayerTeamsCount;
@@ -107,6 +113,7 @@ namespace PVPMod
             extraPlayerTeamsCount = 16;
             SetHooks();
             SetConfigs();
+            DLC1Expansion = Addressables.LoadAssetAsync<ExpansionDef>("RoR2/DLC1/Common/DLC1.asset").WaitForCompletion();
             assetBundle = AssetBundle.LoadFromFileAsync(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(PInfo.Location), "assetbundles", "pvpmod")).assetBundle;
             foreach (Material material in assetBundle.LoadAllAssets<Material>())
             {
@@ -122,6 +129,7 @@ namespace PVPMod
             IncreaseDamageByShieldAndReduceShieldRechargeTime = assetBundle.LoadAsset<PVPModItemDef>("Assets/PVPmod/IncreaseDamageByShieldAndReduceShieldRechargeTime.asset").RegisterItemDef(IncreaseDamageByShieldAndReduceShieldRechargeTimeEvents);
             if (EnableContent.Value)
                 ContentManager.collectContentPackProviders += (addContentPackProvider) => addContentPackProvider(new PVPModContentPack());
+            NetworkingAPI.RegisterMessageType<SpawnPVPCountdown>();
         }
         public static void InitLanguageTokens()
         {
@@ -136,6 +144,7 @@ namespace PVPMod
         {
             EnablePVP = Utils.CreateConfig("Main", "Enable PVP", true, "Enable Players Versus Players after teleporter charge?");
             EnableContent = Utils.CreateConfig("Main", "Enable content", true, "Enable all mod content?");
+            PVPCountdownTimer = Utils.CreateConfig("PVP", "Countdown timer", 3f, "Control countdown timer that begins PVP");
             PVPItemRewardAmount = Utils.CreateConfig("PVP", "Item reward amount", 1, "Control how much items will be spawned on pvp win. Items spawn on the teleporter");
             PVPItemRewardTier1Weight = Utils.CreateConfig("PVP", "Item reward common rarity weight", 100f, "Control weight for common rarity on random item reward selection");
             PVPItemRewardTier2Weight = Utils.CreateConfig("PVP", "Item reward uncommon rarity weight", 0f, "Control weight for uncommon rarity on random item reward selection");
@@ -199,6 +208,7 @@ namespace PVPMod
 
         public static void SetWeights()
         {
+            bool ifIDontDoThisIMightBeKilledByGearbox = Run.instance ? Run.instance.IsExpansionEnabled(DLC1Expansion) : false;
             PVPItemReward.tier1Weight = PVPItemRewardTier1Weight.Value;
             PVPItemReward.tier2Weight = PVPItemRewardTier2Weight.Value;
             PVPItemReward.tier3Weight = PVPItemRewardTier3Weight.Value;
@@ -207,10 +217,10 @@ namespace PVPMod
             PVPItemReward.lunarItemWeight = PVPItemRewardLunarItemWeight.Value;
             PVPItemReward.lunarEquipmentWeight = PVPItemRewardLunarEquipmentWeight.Value;
             PVPItemReward.lunarCombinedWeight = PVPItemRewardLunarCombinedWeight.Value;
-            PVPItemReward.voidTier1Weight = PVPItemRewardTier1VoidWeight.Value;
-            PVPItemReward.voidTier2Weight = PVPItemRewardTier2VoidWeight.Value;
-            PVPItemReward.voidTier3Weight = PVPItemRewardTier3VoidWeight.Value;
-            PVPItemReward.voidBossWeight = PVPItemRewardBossVoidWeight.Value;
+            PVPItemReward.voidTier1Weight = ifIDontDoThisIMightBeKilledByGearbox ? PVPItemRewardTier1VoidWeight.Value : 0f;
+            PVPItemReward.voidTier2Weight = ifIDontDoThisIMightBeKilledByGearbox ? PVPItemRewardTier2VoidWeight.Value : 0f;
+            PVPItemReward.voidTier3Weight = ifIDontDoThisIMightBeKilledByGearbox ? PVPItemRewardTier3VoidWeight.Value : 0f;
+            PVPItemReward.voidBossWeight = ifIDontDoThisIMightBeKilledByGearbox ? PVPItemRewardBossVoidWeight.Value : 0f;
         }
         private static void TeamComponent_onLeaveTeamGlobal(TeamComponent arg1, TeamIndex arg2)
         {
@@ -416,13 +426,14 @@ namespace PVPMod
         public static GameObject PVPCountdownPrefab;
         public static void StartPVP()
         {
-            if (!EnablePVP.Value) return;
+            if (!EnablePVP.Value || !NetworkServer.active) return;
             startingPVP = true;
-            startingStopwatch = 3f;
-            Instantiate(PVPCountdownPrefab);
+            startingStopwatch = PVPCountdownTimer.Value;
+            new SpawnPVPCountdown(startingStopwatch).Send(NetworkDestination.Clients);
         }
         public static void BeginPVP()
         {
+            SetWeights();
             if (!NetworkServer.active || pvpEnabled || !EnablePVP.Value) return;
             int playersCount = PlayerCharacterMasterController.instances.Count;
             if (playersCount <= 1) return;
@@ -451,6 +462,7 @@ namespace PVPMod
         }
         public static void EndPVP()
         {
+            startingPVP = false;
             if (!NetworkServer.active || !pvpEnabled) return;
             int playersCount = PlayerCharacterMasterController.instances.Count;
             if (playersCount <= 1) return;
@@ -496,7 +508,6 @@ namespace PVPMod
                 }
             }
             pvpEnabled = false;
-            startingPVP = false;
         }
         public static void ChangeMinionsTeam(PlayerCharacterMasterController playerCharacterMasterController, TeamIndex teamIndex)
         {
@@ -526,6 +537,7 @@ namespace PVPMod
         }
         public void FixedUpdate()
         {
+            if (NetworkServer.active)
             if (startingPVP)
             {
                 startingStopwatch -= Time.fixedDeltaTime;
@@ -600,7 +612,34 @@ namespace PVPMod
             }
         }
     }
+    public class SpawnPVPCountdown : INetMessage
+    {
+        public float countdown;
+        public SpawnPVPCountdown()
+        {
 
+        }
+        public SpawnPVPCountdown(float countdown)
+        {
+            this.countdown = countdown;
+        }
+        public void Deserialize(NetworkReader reader)
+        {
+            countdown = reader.ReadSingle();
+        }
+
+        public void OnReceived()
+        {
+            GameObject gameObject = GameObject.Instantiate(PVPModPlugin.PVPCountdownPrefab);
+            PVPCountdown pVPCountdown = gameObject.GetComponent<PVPCountdown>();
+            pVPCountdown.countdown = countdown;
+        }
+
+        public void Serialize(NetworkWriter writer)
+        {
+            writer.Write(countdown);
+        }
+    }
     [CreateAssetMenu(menuName = "PVPMod/PVPModItemDef")]
     public class PVPModItemDef : ItemDef
     {
