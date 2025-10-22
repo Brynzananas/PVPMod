@@ -49,7 +49,7 @@ namespace PVPMod
     {
         public const string ModGuid = "com.brynzananas.pvpmod";
         public const string ModName = "PVP mod";
-        public const string ModVer = "1.0.0";
+        public const string ModVer = "1.1.0";
         public static bool riskOfOptionsEnabled { get; private set; }
         public static PVPModPlugin instance { get; private set; }
         public static BepInEx.PluginInfo PInfo { get; private set; }
@@ -136,7 +136,7 @@ namespace PVPMod
         {
             Utils.AddLanguageToken(StrongerDeathMark.nameToken, "Chaotic Death Mark of Doom");
             Utils.AddLanguageToken(StrongerDeathMark.pickupToken, $"Enemies with {Utils.damagePrefix}{StrongerDeathMarkMinimumDebuffsToTrigger.Value}{Utils.endPrefix} or more {(StrongerDeathMarkCountDebuffStacks.Value ? "debuff stacks" : "debuffs")} are marked for death, taking bonus damage.");
-            Utils.AddLanguageToken(StrongerDeathMark.descriptionToken, $"Enemies with {Utils.damagePrefix}{StrongerDeathMarkMinimumDebuffsToTrigger.Value}{Utils.endPrefix}, or more {(StrongerDeathMarkCountDebuffStacks.Value ? "debuff stacks" : "debuffs")} are {Utils.damagePrefix}marked for death{Utils.endPrefix}, increasing damage taken by {Utils.damagePrefix}{StrongerDeathMarkDebuffDamageIncrease.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{StrongerDeathMarkDebuffDamageIncreasePerStack.Value}% per stack){Utils.endPrefix} from all sources for {Utils.utilityPrefix}{StrongerDeathMarkDebuffDuration.Value}{Utils.endPrefix} {Utils.stackPrefix}(+{StrongerDeathMarkDebuffDuration.Value}% per stack){Utils.endPrefix} seconds.");
+            Utils.AddLanguageToken(StrongerDeathMark.descriptionToken, $"Enemies with {Utils.damagePrefix}{StrongerDeathMarkMinimumDebuffsToTrigger.Value}{Utils.endPrefix}, or more {(StrongerDeathMarkCountDebuffStacks.Value ? "debuff stacks" : "debuffs")} are {Utils.damagePrefix}marked for death{Utils.endPrefix}, increasing damage taken by {Utils.damagePrefix}{StrongerDeathMarkDebuffDamageIncrease.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{StrongerDeathMarkDebuffDamageIncreasePerStack.Value}% per stack){Utils.endPrefix} from all sources for {Utils.utilityPrefix}{StrongerDeathMarkDebuffDuration.Value}{Utils.endPrefix} {Utils.stackPrefix} (+{StrongerDeathMarkDebuffDuration.Value} per stack){Utils.endPrefix} seconds.");
             Utils.AddLanguageToken(IncreaseDamageByShieldAndReduceShieldRechargeTime.nameToken, "Exoskeleton Of Ruinous Powers");
             Utils.AddLanguageToken(IncreaseDamageByShieldAndReduceShieldRechargeTime.pickupToken, "Increase damage by max shield and reduce shield recharge start time.");
             Utils.AddLanguageToken(IncreaseDamageByShieldAndReduceShieldRechargeTime.descriptionToken, $"Deal {Utils.healingPrefix}{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplier.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplierPerStack.Value}% per stack){Utils.endPrefix} of your max shields as {Utils.damagePrefix}damage{Utils.endPrefix}. Reduce shield recharge start time by {Utils.utilityPrefix}{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack.Value}% per stack){Utils.endPrefix}.");
@@ -205,6 +205,7 @@ namespace PVPMod
                 if (teamIndex1 == teamIndex) continue;
                 self.SetTeamExperience(teamIndex1, newExperience);
             }
+            thisIsStupid = false;
         }
 
         public static void SetWeights()
@@ -226,7 +227,7 @@ namespace PVPMod
         private static void TeamComponent_onLeaveTeamGlobal(TeamComponent arg1, TeamIndex arg2)
         {
             CharacterBody characterBody = arg1.body;
-            if (characterBody == null || !playerTeamIndeces.Contains(arg2)) return;
+            if (characterBody == null || !characterBody.isPlayerControlled || !playerTeamIndeces.Contains(arg2)) return;
             if (!activePVPBodies.Contains(characterBody)) return;
             activePVPBodies.Remove(characterBody);
         }
@@ -234,7 +235,7 @@ namespace PVPMod
         private static void TeamComponent_onJoinTeamGlobal(TeamComponent arg1, TeamIndex arg2)
         {
             CharacterBody characterBody = arg1.body;
-            if (characterBody == null || !playerTeamIndeces.Contains(arg2)) return;
+            if (characterBody == null || !characterBody.isPlayerControlled || !playerTeamIndeces.Contains(arg2)) return;
             if (activePVPBodies.Contains(characterBody)) return;
             activePVPBodies.Add(characterBody);
         }
@@ -244,11 +245,11 @@ namespace PVPMod
             if (!pvpEnabled || !NetworkServer.active) return;
             TeamIndex teamIndex = obj.victimTeamIndex;
             if (!playerTeamIndeces.Contains(teamIndex)) return;
+            if (obj.victimMaster && obj.victimMaster.playerCharacterMasterController && !losers.Contains(obj.victimMaster.playerCharacterMasterController)) losers.Add(obj.victimMaster.playerCharacterMasterController);
             int alive = 0;
             CharacterBody lastPlayer = null;
             foreach (CharacterBody characterBody in activePVPBodies)
             {
-                Debug.Log(characterBody);
                 if (characterBody == null || !characterBody.isPlayerControlled) continue;
                 bool isDead = characterBody.master ? characterBody.master.IsDeadAndOutOfLivesServer() : true;
                 if (isDead) continue;
@@ -256,11 +257,13 @@ namespace PVPMod
                 alive++;
             }
             if (alive > 1) return;
+            EndPVP(true);
             SpawnItems();
-            EndPVP();
         }
         public static void SpawnItems()
         {
+            if (Run.instance == null || Run.instance.bossRewardRng == null) return;
+            if (TeleporterInteraction.instance == null || TeleporterInteraction.instance.bossGroup == null) return;
             if (PVPItemRewardAmount.Value <= 0) return;
             float num2 = 360f / PVPItemRewardAmount.Value;
             Vector3 vector = Quaternion.AngleAxis(UnityEngine.Random.Range(0, 360), Vector3.up) * (Vector3.up * 40f + Vector3.forward * 5f);
@@ -420,14 +423,18 @@ namespace PVPMod
             On.RoR2.TeamManager.SetTeamExperience -= TeamManager_SetTeamExperience;
             RoR2Application.onLoadFinished -= InitLanguageTokens;
         }
-        private static void Stage_onServerStageBegin(Stage obj) => EndPVP();
+        private static void Stage_onServerStageBegin(Stage obj) => EndPVP(false);
         private static void TeleporterInteraction_onTeleporterChargedGlobal(TeleporterInteraction obj) => StartPVP();
         public static bool startingPVP = false;
         public static float startingStopwatch;
         public static GameObject PVPCountdownPrefab;
+        public static List<PlayerCharacterMasterController> losers = [];
         public static void StartPVP()
         {
             if (!EnablePVP.Value || !NetworkServer.active) return;
+            calling = false;
+            int playersCount = GetAlivePlayers().Count;
+            if (playersCount <= 1) return;
             startingPVP = true;
             startingStopwatch = PVPCountdownTimer.Value;
             new SpawnPVPCountdown(startingStopwatch).Send(NetworkDestination.Clients);
@@ -436,8 +443,13 @@ namespace PVPMod
         {
             SetWeights();
             if (!NetworkServer.active || pvpEnabled || !EnablePVP.Value) return;
-            int playersCount = PlayerCharacterMasterController.instances.Count;
+            calling = false;
+            int playersCount = GetAlivePlayers().Count;
             if (playersCount <= 1) return;
+            playersCount = PlayerCharacterMasterController.instances.Count;
+            pvpEnabled = true;
+            losers.Clear();
+            networkUsers.Clear();
             int readyTeamsCount = playerTeamDefs.Count;
             int j = 0;
             for (int i = 0; i < readyTeamsCount; i++)
@@ -459,14 +471,17 @@ namespace PVPMod
                 characterMaster.teamIndex = teamIndex;
                 ChangeMinionsTeam(playerCharacterMasterController, teamIndex);
             }
-            pvpEnabled = true;
         }
-        public static void EndPVP()
+        public static void EndPVP(bool punish)
         {
-            startingPVP = false;
             if (!NetworkServer.active || !pvpEnabled) return;
-            int playersCount = PlayerCharacterMasterController.instances.Count;
+            calling = false;
+            int playersCount = GetAlivePlayers().Count;
             if (playersCount <= 1) return;
+            playersCount = PlayerCharacterMasterController.instances.Count;
+            pvpEnabled = false;
+            startingPVP = false;
+            networkUsers.Clear();
             int readyTeamsCount = playerTeamDefs.Count;
             for (int i = 0; i < playersCount; i++)
             {
@@ -479,9 +494,12 @@ namespace PVPMod
                 if (teamComponent) teamComponent.teamIndex = teamIndex;
                 characterMaster.teamIndex = teamIndex;
                 ChangeMinionsTeam(playerCharacterMasterController, teamIndex);
+                if (!punish) continue;
                 Inventory inventory = characterMaster.inventory;
                 if (!inventory) continue;
                 if (!characterMaster.IsDeadAndOutOfLivesServer()) continue;
+                if (!losers.Contains(playerCharacterMasterController)) continue;
+                losers.Remove(playerCharacterMasterController);
                 int tonicAfflictionAmount = PVPLoserSpinelAfflictionsAmount.Value;
                 if (tonicAfflictionAmount > 0)
                     inventory.GiveItem(RoR2Content.Items.TonicAffliction, tonicAfflictionAmount);
@@ -508,7 +526,6 @@ namespace PVPMod
                     itemCount--;
                 }
             }
-            pvpEnabled = false;
         }
         public static void ChangeMinionsTeam(PlayerCharacterMasterController playerCharacterMasterController, TeamIndex teamIndex)
         {
@@ -579,6 +596,80 @@ namespace PVPMod
             playerTeamDefs.Add(teamDef);
             playerTeamIndeces.Add(teamIndex);
             return teamIndex;
+        }
+        public static int neededVotes;
+        public static List<NetworkUser> networkUsers = [];
+        public static bool calling;
+        [ConCommand(commandName = "pvp_call", flags = ConVarFlags.ExecuteOnServer)]
+        public static void CallPVPVote(ConCommandArgs args)
+        {
+            if (calling || pvpEnabled) return;
+            int playersCount = GetAlivePlayers().Count;
+            if (playersCount <= 1) return;
+            neededVotes = playersCount - 1;
+            networkUsers.Add(args.sender);
+            calling = true;
+            Chat.SendBroadcastChat(new Chat.UserChatMessage
+            {
+                sender = args.sender.gameObject,
+                text = " has called for PVP. Type `pvp_accept` in the console to proceed. Needed votes: " + neededVotes
+            });
+        }
+        [ConCommand(commandName = "pvp_accept", flags = ConVarFlags.ExecuteOnServer)]
+        public static void AcceptPVPVote(ConCommandArgs args)
+        {
+            if (!calling)
+            {
+                Chat.SendBroadcastChat(new Chat.UserChatMessage
+                {
+                    sender = args.sender.gameObject,
+                    text = " wanted to accept PVP call but it has not been called yet. Use `pvp_call` to call it."
+                });
+            }
+            if (pvpEnabled || networkUsers.Contains(args.sender)) return;
+            neededVotes--;
+            networkUsers.Add(args.sender);
+            if (neededVotes <= 0)
+            {
+                Chat.SendBroadcastChat(new Chat.UserChatMessage
+                {
+                    sender = args.sender.gameObject,
+                    text = " has voted for PVP. Starting PVP!"
+                });
+                StartPVP();
+                calling = false;
+            }
+            else
+            {
+                Chat.SendBroadcastChat(new Chat.UserChatMessage
+                {
+                    sender = args.sender.gameObject,
+                    text = " has voted for PVP. Needed votes: " + neededVotes
+                });
+            }
+        }
+        [ConCommand(commandName = "pvp_end", flags = ConVarFlags.ExecuteOnServer)]
+        public static void EndPVP(ConCommandArgs args)
+        {
+            if (!pvpEnabled) return;
+            int playersCount = GetAlivePlayers().Count;
+            if (playersCount <= 1) return;
+            Chat.SendBroadcastChat(new Chat.UserChatMessage
+            {
+                sender = args.sender.gameObject,
+                text = " has called for PVP. Type `pvp_accept` in the console to proceed. Needed votes: " + neededVotes
+            });
+            EndPVP(true);
+        }
+        public static List<PlayerCharacterMasterController> GetAlivePlayers()
+        {
+            List<PlayerCharacterMasterController> playerCharacterMasterControllers = [];
+            foreach (PlayerCharacterMasterController playerCharacterMasterController in PlayerCharacterMasterController.instances)
+            {
+                if (playerCharacterMasterController.master && playerCharacterMasterController.master.IsDeadAndOutOfLivesServer()) continue;
+                playerCharacterMasterControllers.Add(playerCharacterMasterController);
+            }
+            return playerCharacterMasterControllers;
         }
     }
     public class IncreaseDamageByShieldAndReduceShieldRechargeTimeBehaviour : CharacterBody.ItemBehavior
