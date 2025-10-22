@@ -424,14 +424,17 @@ namespace PVPMod
             RoR2Application.onLoadFinished -= InitLanguageTokens;
         }
         private static void Stage_onServerStageBegin(Stage obj) => EndPVP(false);
-        private static void TeleporterInteraction_onTeleporterChargedGlobal(TeleporterInteraction obj) => StartPVP();
+        private static void TeleporterInteraction_onTeleporterChargedGlobal(TeleporterInteraction obj)
+        {
+            if (EnablePVP.Value) StartPVP();
+        }
         public static bool startingPVP = false;
         public static float startingStopwatch;
         public static GameObject PVPCountdownPrefab;
         public static List<PlayerCharacterMasterController> losers = [];
         public static void StartPVP()
         {
-            if (!EnablePVP.Value || !NetworkServer.active) return;
+            if (!NetworkServer.active) return;
             calling = false;
             int playersCount = GetAlivePlayers().Count;
             if (playersCount <= 1) return;
@@ -442,7 +445,7 @@ namespace PVPMod
         public static void BeginPVP()
         {
             SetWeights();
-            if (!NetworkServer.active || pvpEnabled || !EnablePVP.Value) return;
+            if (!NetworkServer.active || pvpEnabled) return;
             calling = false;
             int playersCount = GetAlivePlayers().Count;
             if (playersCount <= 1) return;
