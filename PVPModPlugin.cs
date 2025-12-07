@@ -10,11 +10,13 @@ using R2API;
 using R2API.Networking;
 using R2API.Networking.Interfaces;
 using R2API.Utils;
+using Rewired;
 using RiskOfOptions;
 using RiskOfOptions.Options;
 using RoR2;
 using RoR2.ContentManagement;
 using RoR2.ExpansionManagement;
+using RoR2BepInExPack.GameAssetPaths;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -49,7 +51,7 @@ namespace PVPMod
     {
         public const string ModGuid = "com.brynzananas.pvpmod";
         public const string ModName = "PVP mod";
-        public const string ModVer = "1.1.0";
+        public const string ModVer = "1.2.0";
         public static bool riskOfOptionsEnabled { get; private set; }
         public static PVPModPlugin instance { get; private set; }
         public static BepInEx.PluginInfo PInfo { get; private set; }
@@ -61,7 +63,11 @@ namespace PVPMod
         public static AssetBundle assetBundle { get; private set; }
         public static PVPModItemDef StrongerDeathMark { get; private set; }
         public static PVPModItemDef IncreaseDamageByShieldAndReduceShieldRechargeTime { get; private set; }
+        public static PVPModItemDef AddVenomOnHitUnderQuestionableConditions { get; private set; }
         public static BuffDef StrongerDeathMarkBuff { get; private set; }
+        public static BuffDef VenomBuff { get; private set; }
+        public static DotController.DotIndex VenomDotIndex;
+        public static DotController.DotDef VenomDot;
         public static List<ConfigEntryBase> configs = [];
         public static ConfigEntry<bool> EnablePVP;
         public static ConfigEntry<bool> EnableContent;
@@ -92,6 +98,19 @@ namespace PVPMod
         public static ConfigEntry<float> IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplierPerStack;
         public static ConfigEntry<float> IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease;
         public static ConfigEntry<float> IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack;
+        public static ConfigEntry<bool> AddVenomOnHitUnderQuestionableConditionsTranscendenceCondition;
+        public static ConfigEntry<bool> AddVenomOnHitUnderQuestionableConditionsWingsCondition;
+        public static ConfigEntry<float> AddVenomOnHitUnderQuestionableConditionsVenomDuration;
+        public static ConfigEntry<float> AddVenomOnHitUnderQuestionableConditionsVenomDurationPerStack;
+        public static ConfigEntry<float> AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageMultiplier;
+        public static ConfigEntry<float> AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageMultiplierPerStack;
+        public static ConfigEntry<bool> AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageStack;
+        public static ConfigEntry<float> AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRecharge;
+        public static ConfigEntry<float> AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRechargePerStack;
+        public static ConfigEntry<bool> AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRechargeStack;
+        public static ConfigEntry<bool> AddVenomOnHitUnderQuestionableConditionsVenomHemorrageStack;
+        public static ConfigEntry<float> AddVenomOnHitUnderQuestionableConditionsVenomHemorrageDuration;
+        public static ConfigEntry<float> AddVenomOnHitUnderQuestionableConditionsVenomHemorrageDamageMultiplier;
         public static BasicPickupDropTable PVPItemReward;
         public static ExpansionDef DLC1Expansion;
         public static int extraPlayerTeamsCount
@@ -128,9 +147,90 @@ namespace PVPMod
             SetWeights();
             StrongerDeathMark = assetBundle.LoadAsset<PVPModItemDef>("Assets/PVPmod/StrongerDeathMark.asset").RegisterItemDef(StrongerDeathMarkEvents);
             IncreaseDamageByShieldAndReduceShieldRechargeTime = assetBundle.LoadAsset<PVPModItemDef>("Assets/PVPmod/IncreaseDamageByShieldAndReduceShieldRechargeTime.asset").RegisterItemDef(IncreaseDamageByShieldAndReduceShieldRechargeTimeEvents);
-            if (EnableContent.Value)
-                ContentManager.collectContentPackProviders += (addContentPackProvider) => addContentPackProvider(new PVPModContentPack());
+            AddVenomOnHitUnderQuestionableConditions = assetBundle.LoadAsset<PVPModItemDef>("Assets/PVPmod/AddVenomOnHitUnderQuestionableConditions.asset").RegisterItemDef(AddVenomOnHitUnderQuestionableConditionsEvents);
+            if (EnableContent.Value) ContentManager.collectContentPackProviders += (addContentPackProvider) => addContentPackProvider(new PVPModContentPack());
             NetworkingAPI.RegisterMessageType<SpawnPVPCountdown>();
+        }
+        public static void AddVenomOnHitUnderQuestionableConditionsEvents(ItemDef itemDef)
+        {
+            VenomBuff = assetBundle.LoadAsset<BuffDef>("Assets/PVPmod/bdVenom.asset").RegisterBuffDef();
+            VenomDot = new DotController.DotDef
+            {
+                interval = 1f,
+                damageCoefficient = 1f,
+                damageColorIndex = DamageColorIndex.Bleed,
+                associatedBuff = VenomBuff
+            };
+            VenomDotIndex = DotAPI.RegisterDotDef(VenomDot, null, null, VenomDamageEvaluation);
+            AddVenomOnHitUnderQuestionableConditionsTranscendenceCondition = Utils.CreateConfig(itemDef.name, "Transcendence Condition", true, "");
+            AddVenomOnHitUnderQuestionableConditionsWingsCondition = Utils.CreateConfig(itemDef.name, "Active Milky Chrisalis Condition", true, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomDuration = Utils.CreateConfig(itemDef.name, "Venom Duration", 5f, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomDurationPerStack = Utils.CreateConfig(itemDef.name, "Venom Duration Per Stack", 1f, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRecharge = Utils.CreateConfig(itemDef.name, "Recharge Shield Percentage", 5f, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRechargePerStack = Utils.CreateConfig(itemDef.name, "Recharge Shield Percentage Per Stack", 1f, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRechargeStack = Utils.CreateConfig(itemDef.name, "Recharge Shield Percentage Stack", true, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageMultiplier = Utils.CreateConfig(itemDef.name, "Victim Damage Percentage", 5f, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageMultiplierPerStack = Utils.CreateConfig(itemDef.name, "Victim Damage Percentage Per Stack", 1f, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageStack = Utils.CreateConfig(itemDef.name, "Victim Damage Stack", true, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomHemorrageStack = Utils.CreateConfig(itemDef.name, "Hemorrage Stack", true, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomHemorrageDuration = Utils.CreateConfig(itemDef.name, "Hemorrage Duration", 15f, "");
+            AddVenomOnHitUnderQuestionableConditionsVenomHemorrageDamageMultiplier = Utils.CreateConfig(itemDef.name, "Hemorrage Damage Percentage", 100f, "");
+            AddVenomOnHitUnderQuestionableConditionsTranscendenceCondition.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsWingsCondition.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsVenomDuration.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsVenomDurationPerStack.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRecharge.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRechargePerStack.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageMultiplier.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageMultiplierPerStack.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageStack.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsVenomHemorrageStack.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsVenomHemorrageDuration.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            AddVenomOnHitUnderQuestionableConditionsVenomHemorrageDamageMultiplier.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
+            GlobalEventManager.onServerDamageDealt += GlobalEventManager_onServerDamageDealt;
+            void GlobalEventManager_onServerDamageDealt(DamageReport obj)
+            {
+                if (obj.damageInfo.damageType.damageType.HasFlag(DamageType.DoT)) return;
+                Inventory inventory = obj.attackerBody?.inventory;
+                if (!inventory || (inventory.GetItemCountEffective(RoR2Content.Items.ShieldOnly) <= 0 && AddVenomOnHitUnderQuestionableConditionsTranscendenceCondition.Value)) return;
+                int itemStacks = inventory.GetItemCountEffective(itemDef);
+                if (itemStacks <= 0) return;
+                JetpackController jetpackController = JetpackController.FindJetpackController(obj.attacker);
+                if (!jetpackController && AddVenomOnHitUnderQuestionableConditionsWingsCondition.Value) return;
+                DotController.InflictDot(obj.victim.gameObject, obj.attacker, obj.damageInfo.inflictedHurtbox, VenomDotIndex, Utils.GetStackingFloat(AddVenomOnHitUnderQuestionableConditionsVenomDuration.Value, AddVenomOnHitUnderQuestionableConditionsVenomDurationPerStack.Value, itemStacks));
+            }
+        }
+        public static void VenomDamageEvaluation(RoR2.DotController self, RoR2.DotController.PendingDamage pendingDamage)
+        {
+            CharacterBody attackerBody = pendingDamage.attackerObject ? pendingDamage.attackerObject.GetComponent<CharacterBody>() : null;
+            if (!attackerBody) return;
+            Inventory inventory = attackerBody.inventory;
+            if (!inventory) return;
+            int itemStacks = inventory.GetItemCountEffective(AddVenomOnHitUnderQuestionableConditions);
+            int buffStacks = self.victimBody.GetBuffCount(VenomBuff);
+            float damage = self.victimBody.damage *= Utils.GetStackingFloat(AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageMultiplier.Value, AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageMultiplierPerStack.Value, itemStacks) / 100f;
+            if (attackerBody)
+            {
+                HealthComponent healthComponent = attackerBody.healthComponent;
+                if (healthComponent) healthComponent.RechargeShield(attackerBody.maxShield * Utils.GetStackingFloat(AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRecharge.Value, AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRechargePerStack.Value, itemStacks) / 100f * (AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRechargeStack.Value ? buffStacks : 1f));
+                if (attackerBody.damage > damage) damage = attackerBody.damage;
+            }
+            DamageInfo damageInfo = new DamageInfo
+            {
+                damage = damage * buffStacks * (AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageStack.Value ? buffStacks : 1f),
+                damageColorIndex = DamageColorIndex.Void,
+                attacker = pendingDamage.attackerObject,
+                inflictor = pendingDamage.attackerObject,
+                position = self.transform.position,
+                inflictedHurtbox = pendingDamage.hitHurtBox,
+                procCoefficient = 0f,
+                damageType = DamageType.DoT
+            };
+            self.victimHealthComponent.TakeDamageProcess(damageInfo);
+            for (int i = 0; i < (AddVenomOnHitUnderQuestionableConditionsVenomHemorrageStack.Value ? buffStacks : 1); i++) DotController.InflictDot(self.victimObject, damageInfo.attacker, pendingDamage.hitHurtBox, DotController.DotIndex.SuperBleed, AddVenomOnHitUnderQuestionableConditionsVenomHemorrageDuration.Value, AddVenomOnHitUnderQuestionableConditionsVenomHemorrageDamageMultiplier.Value / 100f);
+            self.victimBody.AddTimedBuff(RoR2Content.Buffs.HealingDisabled, VenomDot.interval + Time.fixedDeltaTime);
+            self.victimBody.AddTimedBuff(RoR2Content.Buffs.Slow50, VenomDot.interval + Time.fixedDeltaTime);
+            self.victimBody.AddTimedBuff(RoR2Content.Buffs.Weak, VenomDot.interval + Time.fixedDeltaTime);
         }
         public static void InitLanguageTokens()
         {
@@ -140,6 +240,31 @@ namespace PVPMod
             Utils.AddLanguageToken(IncreaseDamageByShieldAndReduceShieldRechargeTime.nameToken, "Exoskeleton Of Ruinous Powers");
             Utils.AddLanguageToken(IncreaseDamageByShieldAndReduceShieldRechargeTime.pickupToken, "Increase damage by max shield and reduce shield recharge start time.");
             Utils.AddLanguageToken(IncreaseDamageByShieldAndReduceShieldRechargeTime.descriptionToken, $"Deal {Utils.healingPrefix}{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplier.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldToDamageMultiplierPerStack.Value}% per stack){Utils.endPrefix} of your max shields as {Utils.damagePrefix}damage{Utils.endPrefix}. Reduce shield recharge start time by {Utils.utilityPrefix}{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncrease.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{IncreaseDamageByShieldAndReduceShieldRechargeTimeShieldRegenSpeedIncreasePerStack.Value}% per stack){Utils.endPrefix}.");
+            Utils.AddLanguageToken(AddVenomOnHitUnderQuestionableConditions.nameToken, "Decaying Siphonbrood Venom");
+            bool con1 = AddVenomOnHitUnderQuestionableConditionsTranscendenceCondition.Value;
+            bool con2 = AddVenomOnHitUnderQuestionableConditionsWingsCondition.Value;
+            string startString;
+            if (con1 || con2)
+            {
+                startString = "While you have";
+                if (con1)
+                {
+                    startString += " Transcendence";
+                }
+                if (con2)
+                {
+                    if (con1) startString += " and";
+                    startString += " Milky Chrysalis activated";
+                }
+                startString += " hitting an enemy injects Decaying Venom.";
+            }
+            else
+            {
+                startString = "Hitting an enemy injects Decaying Venom.";
+            }
+            string fullString = startString + $" While enemy has Decaying Venom you {Utils.healingPrefix}regenerate {AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRecharge.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{AddVenomOnHitUnderQuestionableConditionsVenomAttackerShieldRechargePerStack.Value}% per stack){Utils.endPrefix} of your {Utils.healingPrefix}maximum shield{Utils.endPrefix} per second. Deals {Utils.damagePrefix}{AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageMultiplier.Value}%{Utils.endPrefix} {Utils.stackPrefix}(+{AddVenomOnHitUnderQuestionableConditionsVenomVictimDamageMultiplierPerStack.Value}% per stack){Utils.endPrefix} of the victim's {Utils.damagePrefix}maximum damage{Utils.endPrefix} per second, or an amount per second equivalent to your {Utils.damagePrefix}damage stat{Utils.endPrefix}, whichever is greater. Lasts {Utils.utilityPrefix}{AddVenomOnHitUnderQuestionableConditionsVenomDuration.Value} seconds{Utils.endPrefix} {Utils.stackPrefix}(+{AddVenomOnHitUnderQuestionableConditionsVenomDurationPerStack.Value} seconds per stack){Utils.endPrefix}. Enemy affected gains 1 Hemorrhage stack per second, Healing Disabled, Slowed and Weak while this is active";
+            Utils.AddLanguageToken(AddVenomOnHitUnderQuestionableConditions.pickupToken, startString);
+            Utils.AddLanguageToken(AddVenomOnHitUnderQuestionableConditions.descriptionToken, fullString);
         }
         public static void SetConfigs()
         {
@@ -161,7 +286,7 @@ namespace PVPMod
             PVPItemRewardBossVoidWeight = Utils.CreateConfig("PVP", "Item reward void boss rarity weight", 0f, "Control weight for void boss rarity on random item reward selection");
             PVPLoserLoseItemsAmount = Utils.CreateConfig("PVP", "Lose items amount", 1, "Control how much items PVP losers will lose?");
             PVPLoserLoseItemsRarity = Utils.CreateConfig("PVP", "Lose items rarity", ItemTier.Tier1, "Control which rarity of an item would be removed on PVP lose?");
-            PVPLoserSpinelAfflictionsAmount = Utils.CreateConfig("PVP", "Gain Tonic Affliction", 1, "Control how much Tonic Afflictions PVP losers will get?");
+            PVPLoserSpinelAfflictionsAmount = Utils.CreateConfig("PVP", "Gain Tonic Affliction", 0, "Control how much Tonic Afflictions PVP losers will get?");
             PVPItemRewardTier1Weight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
             PVPItemRewardTier2Weight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
             PVPItemRewardTier3Weight.SettingChanged += PVPItemRewardTier1Weight_SettingChanged;
@@ -193,6 +318,7 @@ namespace PVPMod
             On.RoR2.TeamManager.SetTeamExperience += TeamManager_SetTeamExperience;
             RoR2Application.onLoadFinished += InitLanguageTokens;
         }
+
         private static bool thisIsStupid;
         private static void TeamManager_SetTeamExperience(On.RoR2.TeamManager.orig_SetTeamExperience orig, TeamManager self, TeamIndex teamIndex, ulong newExperience)
         {
@@ -270,8 +396,8 @@ namespace PVPMod
             Quaternion quaternion = Quaternion.AngleAxis(num2, Vector3.up);
             for (int i = 0; i < PVPItemRewardAmount.Value; i++)
             {
-                PickupIndex pickupIndex = PVPItemReward.GenerateDrop(Run.instance.bossRewardRng);
-                PickupDropletController.CreatePickupDroplet(pickupIndex, TeleporterInteraction.instance.bossGroup.dropPosition.position, vector);
+                UniquePickup uniquePickup = PVPItemReward.GeneratePickup(Run.instance.bossRewardRng);
+                PickupDropletController.CreatePickupDroplet(uniquePickup, TeleporterInteraction.instance.bossGroup.dropPosition.position, vector);
                 vector = quaternion * vector;
             }
         }
@@ -297,7 +423,7 @@ namespace PVPMod
                 void CharacterBody_HandleCascadingBuffs(On.RoR2.CharacterBody.orig_HandleCascadingBuffs orig, CharacterBody self)
                 {
                     orig(self);
-                    int itemCount = Util.GetItemCountGlobal(itemDef.itemIndex, true, true) - (self.teamComponent ? Util.GetItemCountForTeam(self.teamComponent.teamIndex, itemDef.itemIndex, true, true) : (self.inventory ? self.inventory.GetItemCount(itemDef) : 0));
+                    int itemCount = Util.GetItemCountGlobal(itemDef.itemIndex, true, true) - (self.teamComponent ? Util.GetItemCountForTeam(self.teamComponent.teamIndex, itemDef.itemIndex, true, true) : (self.inventory ? self.inventory.GetItemCountEffective(itemDef) : 0));
                     if (itemCount <= 0) return;
                     if (self.HasBuff(buffDef)) return;
                     int num = 0;
@@ -479,9 +605,9 @@ namespace PVPMod
         {
             if (!NetworkServer.active || !pvpEnabled) return;
             calling = false;
-            int playersCount = GetAlivePlayers().Count;
-            if (playersCount <= 1) return;
-            playersCount = PlayerCharacterMasterController.instances.Count;
+            //int playersCount = GetAlivePlayers().Count;
+            //if (playersCount <= 1) return;
+            int playersCount = PlayerCharacterMasterController.instances.Count;
             pvpEnabled = false;
             startingPVP = false;
             networkUsers.Clear();
@@ -510,7 +636,7 @@ namespace PVPMod
                 int itemCount = 0;
                 for (int j = 0; j < ItemCatalog.itemCount; j++)
                 {
-                    int itemStacks = inventory.itemStacks[j];
+                    int itemStacks = inventory.permanentItemStacks.inner.sparseValues[j];
                     if (itemStacks <= 0) continue;
                     ItemDef itemDef = ItemCatalog.GetItemDef((ItemIndex)j);
                     if (itemDef == null || !itemDef.canRemove || itemDef.tier != PVPLoserLoseItemsRarity.Value) continue;
@@ -524,7 +650,7 @@ namespace PVPMod
                 for (int j = 0; j < loseItemsAmount && itemCount > 0; j++)
                 {
                     ItemDef itemDef = list[UnityEngine.Random.Range(0, itemCount)];
-                    inventory.RemoveItem(itemDef);
+                    inventory.RemoveItemPermanent(itemDef);
                     list.Remove(itemDef);
                     itemCount--;
                 }
